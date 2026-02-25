@@ -1365,7 +1365,7 @@ impl GF5_248 {
     }
 
     pub fn batch_sqrt<const N: usize>(inputs: &[Self; N]) -> [(Self, u32); N] {
-        let mut z = *inputs;
+        let z = *inputs;
 
         // Candidate root is self^((q+1)/4).
         // (q+1)/4 = 5*2^246
