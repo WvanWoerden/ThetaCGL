@@ -374,6 +374,71 @@ macro_rules! define_fp2_core {
                 (y, r)
             }
 
+            pub fn batch_sqrt<const N: usize>(inputs: &[Self; N]) -> [(Self, u32); N] {
+                // Stage 1: Compute norms and batch sqrt them
+                let mut norms = [Fp::ZERO; N];
+                for i in 0..N {
+                    norms[i] = inputs[i].x0.square() + inputs[i].x1.square();
+                }
+                let sqrt_deltas = Fp::batch_sqrt::<N>(&norms);
+
+                // Stage 2: Compute y0sq and batch sqrt them
+                let mut y0sqs = [Fp::ZERO; N];
+                let mut nqrs = [0u32; N];
+                let mut x1zs = [0u32; N];
+                let mut r1s = [0u32; N];
+
+                for i in 0..N {
+                    let (sqrt_delta, r1) = sqrt_deltas[i];
+                    r1s[i] = r1;
+
+                    let mut y0sq = (inputs[i].x0 + sqrt_delta).half();
+                    let x1z = inputs[i].x1.iszero();
+                    x1zs[i] = x1z;
+
+                    y0sq.set_cond(&inputs[i].x0, x1z);
+
+                    let ls = y0sq.legendre();
+                    let nqr = (ls >> 1) as u32;
+                    nqrs[i] = nqr;
+
+                    y0sq.set_condneg(nqr & x1z);
+                    y0sq.set_cond(&(y0sq - sqrt_delta), nqr & !x1z);
+                    y0sqs[i] = y0sq;
+                }
+
+                let y0s_results = Fp::batch_sqrt::<N>(&y0sqs);
+
+                // Batch inversion for y1 calculation
+                let mut denoms = [Fp::ZERO; N];
+                for i in 0..N {
+                    let (y0, _) = y0s_results[i];
+                    denoms[i] = y0.mul2();
+                }
+                let inv_denoms = Fp::batch_invert_fixed::<N>(&denoms);
+
+                let mut results = [(Self::ZERO, 0); N];
+                for i in 0..N {
+                    let (mut y0, r2) = y0s_results[i];
+                    let r = r1s[i] & r2;
+
+                    let mut y1 = inputs[i].x1 * inv_denoms[i];
+                    Fp::condswap(&mut y0, &mut y1, nqrs[i] & x1zs[i]);
+
+                    let mut res = inputs[i];
+                    res.x0.set_select(&Fp::ZERO, &y0, r);
+                    res.x1.set_select(&Fp::ZERO, &y1, r);
+
+                    let x0odd = ((res.x0.encode()[0] as u32) & 1).wrapping_neg();
+                    let x1odd = ((res.x1.encode()[0] as u32) & 1).wrapping_neg();
+                    let x0z = res.x0.iszero();
+                    res.set_condneg(x0odd | (x0z & x1odd));
+
+                    results[i] = (res, r);
+                }
+                results
+            }
+
             /// Set this value to its fourth root. Returned value is 0xFFFFFFFFFFFFFFFF if
             /// the operation succeeded (value was indeed a fourth root), or
             /// 0x00000000 otherwise. On success, the chosen root is the one whose
@@ -1259,6 +1324,40 @@ macro_rules! define_fp2_tests {
                     vb.fill(0);
                 }
                 check_fp2_ops(&va, &vb, true);
+            }
+        }
+
+        #[test]
+        fn fp2_batch_sqrt_6() {
+            let mut va = [0u8; (2 * Fp::ENCODED_LENGTH + 64) & !31usize];
+            for i in 0..20 {
+                let mut inputs = [Fp2::ZERO; 6];
+                for k in 0..6 {
+                    let mut sh = Sha256::new();
+                    for j in 0..(va.len() >> 5) {
+                        sh.update(((24 * i + 4 * k + 8 * j) as u64).to_le_bytes());
+                        va[(32 * j)..(32 * j + 32)].copy_from_slice(&sh.finalize_reset());
+                    }
+                    // Square it to make sure it has a sqrt (mostly)
+                    let a0 = Fp::decode_reduce(&va[..Fp::ENCODED_LENGTH]);
+                    let a1 = Fp::decode_reduce(&va[Fp::ENCODED_LENGTH..2 * Fp::ENCODED_LENGTH]);
+                    inputs[k] = Fp2::new(&a0, &a1).square();
+                }
+
+                let batch_results = Fp2::batch_sqrt::<6>(&inputs);
+                for k in 0..6 {
+                    let (expected_res, expected_r) = inputs[k].sqrt();
+                    let (actual_res, actual_r) = batch_results[k];
+                    assert_eq!(expected_r, actual_r, "r mismatch at k={} i={}", k, i);
+                    assert!(
+                        actual_res.equals(&expected_res) == 0xFFFFFFFF,
+                        "result mismatch at k={} i={}\nexpected: {:?}\nactual:   {:?}",
+                        k,
+                        i,
+                        expected_res,
+                        actual_res
+                    );
+                }
             }
         }
     };

@@ -252,6 +252,124 @@ impl GFp {
         (y, r)
     }
 
+    pub fn batch_sqrt<const N: usize>(inputs: &[Self; N]) -> [(Self, u32); N] {
+        let x = *inputs;
+
+        // Helper to square all N elements
+        let batch_square = |v: &mut [Self; N]| {
+            for i in 0..N {
+                v[i] = v[i].square();
+            }
+        };
+
+        // Helper to multiply two arrays of N elements
+        let batch_mul = |dest: &mut [Self; N], src: &[Self; N]| {
+            for i in 0..N {
+                dest[i] = dest[i] * src[i];
+            }
+        };
+
+        // Helper for xsquare (repeated squaring)
+        let batch_xsquare = |v: &mut [Self; N], n: u32| {
+            for _ in 0..n {
+                batch_square(v);
+            }
+        };
+
+        // x2 = x * x.square()
+        let mut t = x;
+        batch_square(&mut t);
+        let mut x2 = x;
+        batch_mul(&mut x2, &t);
+
+        // x4 = x2 * x2.xsquare(2)
+        t = x2;
+        batch_xsquare(&mut t, 2);
+        let mut x4 = x2;
+        batch_mul(&mut x4, &t);
+
+        // x6 = x2 * x4.xsquare(2)
+        t = x4;
+        batch_xsquare(&mut t, 2);
+        let mut x6 = x2;
+        batch_mul(&mut x6, &t);
+
+        // x7 = x * x6.square()
+        t = x6;
+        batch_square(&mut t);
+        let mut x7 = x;
+        batch_mul(&mut x7, &t);
+
+        // x14 = x7 * x7.xsquare(7)
+        t = x7;
+        batch_xsquare(&mut t, 7);
+        let mut x14 = x7;
+        batch_mul(&mut x14, &t);
+
+        // x28 = x14 * x14.xsquare(14)
+        t = x14;
+        batch_xsquare(&mut t, 14);
+        let mut x28 = x14;
+        batch_mul(&mut x28, &t);
+
+        // x56 = x28 * x28.xsquare(28)
+        t = x28;
+        batch_xsquare(&mut t, 28);
+        let mut x56 = x28;
+        batch_mul(&mut x56, &t);
+
+        // y = x56.xsquare(6)
+        let mut y = x56;
+        batch_xsquare(&mut y, 6);
+
+        let mut results = [(Self::ZERO, 0); N];
+
+        for i in 0..N {
+            let ctl = ((y[i].0 as u32) & 1).wrapping_neg();
+            y[i].set_condneg(ctl);
+
+            let r = y[i].square().equals(&inputs[i]);
+            let r_64 = (r as u64) | ((r as u64) << 32);
+            y[i].0 &= r_64;
+            results[i] = (y[i], r);
+        }
+
+        results
+    }
+
+    pub fn batch_invert_fixed<const N: usize>(inputs: &[Self; N]) -> [Self; N] {
+        if N == 0 {
+            return [Self::ZERO; N];
+        }
+        let mut tmp_inputs = *inputs;
+        let mut is_zero_mask = [0u32; N];
+
+        for i in 0..N {
+            is_zero_mask[i] = tmp_inputs[i].iszero();
+            tmp_inputs[i].set_cond(&Self::ONE, is_zero_mask[i]);
+        }
+
+        let mut scratch = [Self::ZERO; N];
+        scratch[0] = tmp_inputs[0];
+        for i in 1..N {
+            scratch[i] = scratch[i - 1] * tmp_inputs[i];
+        }
+
+        let mut inv = scratch[N - 1].invert();
+
+        let mut results = [Self::ZERO; N];
+        for i in (1..N).rev() {
+            let mut res = scratch[i - 1] * inv;
+            res.set_cond(&Self::ZERO, is_zero_mask[i]);
+            results[i] = res;
+            inv = inv * tmp_inputs[i];
+        }
+        inv.set_cond(&Self::ZERO, is_zero_mask[0]);
+        results[0] = inv;
+
+        results
+    }
+
     /// Set this value to its fourth root. Returned value is 0xFFFFFFFF if
     /// the operation succeeded (value was indeed some element to the power of four), or
     /// 0x00000000 otherwise. On success, the chosen root is the one whose
@@ -840,6 +958,50 @@ mod tests {
             let (r3, c3) = z4.eighth_root();
             assert!(r3.xsquare(3).equals(&z4) == 0xFFFFFFFF);
             assert!(c3 == 0xFFFFFFFF);
+        }
+    }
+
+    #[test]
+    fn test_batch_invert_6() {
+        let mut prng = PRNG(0);
+        for _ in 0..100 {
+            let mut inputs = [GFp::ZERO; 6];
+            for i in 0..6 {
+                inputs[i] = GFp::from_u64_reduce(prng.next_u64());
+            }
+            // Introduce some zeros explicitly
+            if prng.next_u64() % 4 == 0 {
+                inputs[2] = GFp::ZERO;
+            }
+            if prng.next_u64() % 4 == 0 {
+                inputs[5] = GFp::ZERO;
+            }
+
+            let batch_res = GFp::batch_invert_fixed::<6>(&inputs);
+            for i in 0..6 {
+                let single_res = inputs[i].invert();
+                assert!(batch_res[i].equals(&single_res) == 0xFFFFFFFF);
+            }
+        }
+    }
+
+    #[test]
+    fn test_batch_sqrt() {
+        let mut prng = PRNG(0);
+        for _ in 0..100 {
+            let mut inputs = [GFp::ZERO; 6];
+            for i in 0..6 {
+                inputs[i] = GFp::from_u64_reduce(prng.next_u64()).square();
+            }
+            inputs[2] = GFp::ZERO;
+
+            let results = GFp::batch_sqrt::<6>(&inputs);
+            for i in 0..6 {
+                let (expected_res, expected_r) = inputs[i].sqrt();
+                let (actual_res, actual_r) = results[i];
+                assert_eq!(expected_r, actual_r);
+                assert!(actual_res.equals(&expected_res) == 0xFFFFFFFF);
+            }
         }
     }
 }

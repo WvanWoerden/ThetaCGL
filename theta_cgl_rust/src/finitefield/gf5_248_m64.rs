@@ -1364,6 +1364,74 @@ impl GF5_248 {
         (x, r)
     }
 
+    pub fn batch_sqrt<const N: usize>(inputs: &[Self; N]) -> [(Self, u32); N] {
+        let mut z = *inputs;
+
+        // Candidate root is self^((q+1)/4).
+        // (q+1)/4 = 5*2^246
+        // z5 = z * z.xsquare(2)
+        let mut z5 = z;
+        for i in 0..N {
+            z5[i].set_xsquare(2);
+            z5[i] *= z[i];
+        }
+
+        // y = z5.xsquare(246)
+        let mut y = z5;
+        for _ in 0..246 {
+            for i in 0..N {
+                y[i].set_square();
+            }
+        }
+
+        let mut results = [(Self::ZERO, 0); N];
+        for i in 0..N {
+            // Normalize y and negate it if necessary to set the low bit to 0.
+            let mut yn = y[i];
+            yn.set_montgomery_reduce();
+            y[i].set_cond(&-y[i], ((yn.0[0] as u32) & 1).wrapping_neg());
+
+            // Check that the candidate is indeed a square root.
+            let r = y[i].square().equals(&inputs[i]);
+            y[i].set_cond(&Self::ZERO, !r);
+            results[i] = (y[i], r);
+        }
+        results
+    }
+
+    pub fn batch_invert_fixed<const N: usize>(inputs: &[Self; N]) -> [Self; N] {
+        if N == 0 {
+            return [Self::ZERO; N];
+        }
+        let mut tmp_inputs = *inputs;
+        let mut is_zero_mask = [0u32; N];
+
+        for i in 0..N {
+            is_zero_mask[i] = tmp_inputs[i].iszero();
+            tmp_inputs[i].set_cond(&Self::ONE, is_zero_mask[i]);
+        }
+
+        let mut scratch = [Self::ZERO; N];
+        scratch[0] = tmp_inputs[0];
+        for i in 1..N {
+            scratch[i] = scratch[i - 1] * tmp_inputs[i];
+        }
+
+        let mut inv = scratch[N - 1].invert();
+
+        let mut results = [Self::ZERO; N];
+        for i in (1..N).rev() {
+            let mut res = scratch[i - 1] * inv;
+            res.set_cond(&Self::ZERO, is_zero_mask[i]);
+            results[i] = res;
+            inv = inv * tmp_inputs[i];
+        }
+        inv.set_cond(&Self::ZERO, is_zero_mask[0]);
+        results[0] = inv;
+
+        results
+    }
+
     // Compute the square root of this value. Returned value are (y, r):
     //  - If this value is indeed a quadratic residue, then y is a
     //    square root of this value, and r is 0xFFFFFFFF.
@@ -2288,6 +2356,46 @@ mod tests {
                 assert!(yy[i].iszero() == 0xFFFFFFFF);
             } else {
                 assert!((xx[i] * yy[i]).equals(&GF5_248::ONE) == 0xFFFFFFFF);
+            }
+        }
+    }
+
+    #[test]
+    fn gf5_248_batch_invert_fixed() {
+        let mut sh = Sha256::new();
+        for _ in 0..10 {
+            let mut inputs = [GF5_248::ZERO; 6];
+            for i in 0..6 {
+                sh.update((i as u64).to_le_bytes());
+                inputs[i] = GF5_248::decode_reduce(&sh.finalize_reset());
+            }
+            inputs[3] = GF5_248::ZERO;
+
+            let results = GF5_248::batch_invert_fixed::<6>(&inputs);
+            for i in 0..6 {
+                let expected = inputs[i].invert();
+                assert!(results[i].equals(&expected) == 0xFFFFFFFF);
+            }
+        }
+    }
+
+    #[test]
+    fn gf5_248_batch_sqrt() {
+        let mut sh = Sha256::new();
+        for _ in 0..10 {
+            let mut inputs = [GF5_248::ZERO; 6];
+            for i in 0..6 {
+                sh.update((i as u64).to_le_bytes());
+                inputs[i] = GF5_248::decode_reduce(&sh.finalize_reset()).square();
+            }
+            inputs[1] = GF5_248::ZERO;
+
+            let results = GF5_248::batch_sqrt::<6>(&inputs);
+            for i in 0..6 {
+                let (expected_res, expected_r) = inputs[i].sqrt();
+                let (actual_res, actual_r) = results[i];
+                assert_eq!(expected_r, actual_r);
+                assert!(actual_res.equals(&expected_res) == 0xFFFFFFFF);
             }
         }
     }

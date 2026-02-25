@@ -29,3 +29,8 @@ harness = false
 name = "th64"
 path = "benches/th64.rs"
 harness = false
+
+[[bench]]
+name = "gf64_257_bench"
+path = "benches/gf64_257_bench.rs"
+harness = false

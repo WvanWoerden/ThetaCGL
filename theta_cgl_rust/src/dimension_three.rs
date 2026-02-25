@@ -142,14 +142,23 @@ macro_rules! define_dim_three_theta_core {
                 let [x0, x1, x2, x3, x4, x5, x6, x7] = xi_list;
 
                 // Compute six square roots, y0 and y7 are set to ensure compatibility
-                let y0;
-                let mut y1 = (&x0 * &x1).sqrt().0;
-                let mut y2 = (&x0 * &x2).sqrt().0;
-                let mut y3 = (&x0 * &x3).sqrt().0;
-                let mut y4 = (&x0 * &x4).sqrt().0;
-                let mut y5 = (&x0 * &x5).sqrt().0;
-                let mut y6 = (&x0 * &x6).sqrt().0;
-                let y7;
+                let y0: Fq;
+                let inputs = [
+                    &x0 * &x1,
+                    &x0 * &x2,
+                    &x0 * &x3,
+                    &x0 * &x4,
+                    &x0 * &x5,
+                    &x0 * &x6,
+                ];
+                let results = Fq::batch_sqrt::<6>(&inputs);
+                let mut y1 = results[0].0;
+                let mut y2 = results[1].0;
+                let mut y3 = results[2].0;
+                let mut y4 = results[3].0;
+                let mut y5 = results[4].0;
+                let mut y6 = results[5].0;
+                let y7: Fq;
 
                 // Conditionally negate six square roots based on message bits
                 let ctl1 = ((bits[0] as u32) & 1).wrapping_neg();
@@ -290,7 +299,6 @@ macro_rules! define_dim_three_theta_core {
 
                 T
             }
-
             pub fn hash(self, msg: Vec<u8>) -> (Fq, Fq, Fq, Fq, Fq, Fq, Fq) {
                 let padded_msg = pad_msg(msg, self.block_size);
                 let T = self.bit_string(Self::O0, padded_msg);

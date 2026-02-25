@@ -61,9 +61,11 @@ macro_rules! define_dim_two_theta_core {
                 let (x0, x1, x2, x3) = self.squared_theta();
 
                 // Compute yi = sqrt(x0 * xi)
-                let mut y1 = (&x0 * &x1).sqrt().0;
-                let mut y2 = (&x0 * &x2).sqrt().0;
-                let mut y3 = (&x0 * &x3).sqrt().0;
+                let inputs = [&x0 * &x1, &x0 * &x2, &x0 * &x3];
+                let results = Fq::batch_sqrt::<3>(&inputs);
+                let mut y1 = results[0].0;
+                let mut y2 = results[1].0;
+                let mut y3 = results[2].0;
 
                 // Consume bits by setting signs
                 let ctl1 = ((bits[0] as u32) & 1).wrapping_neg();
